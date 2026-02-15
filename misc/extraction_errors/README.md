@@ -1,3 +1,0 @@
-# Errors in extracting zips from ESword...
-
-These files encountered errors while being extracted. They are saved here so that they can be addressed later. 
