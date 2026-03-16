@@ -4,6 +4,18 @@ This repository contains a collection of scripts designed to generate various fo
 
 ### Scripts
 
+- **generate_postgresql.js**
+  - **Description**: Generates a PostgreSQL SQL dump file for a selected Bible translation into `formats/psql/`, or directly imports the data into a running PostgreSQL database when the `--direct` flag is provided.
+  - **Usage (dump file)**:
+    ```bash
+    node scripts/generate_postgresql.js [--language=<lang>] [--translation=<trans>] [--dry-run]
+    ```
+  - **Usage (direct import)**:
+    ```bash
+    node scripts/generate_postgresql.js --direct [--language=<lang>] [--translation=<trans>] [--all]
+    ```
+  - **Direct import options**: Requires `DB_USER` and `DB_PASSWORD` set in a `.env` file. Optional env vars: `DB_HOST` (default `localhost`), `DB_PORT` (default `5432`), `DB_NAME` (default `bible_db`), `DB_SSLMODE` (set to `require` for SSL). Use `--all` / `-a` to import every translation for the selected language in one run.
+
 - **extract_esword_zips.py**
   - **Description**: Extracts all ESword zip files in the sources directory that do not yet have an accompanying `<translation>.json` file.
   - **Usage**: Run the script ... it knows what to do.
