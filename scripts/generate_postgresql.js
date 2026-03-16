@@ -113,10 +113,14 @@ function generatePostgreSQL(sourceDirectory, formatDirectory, language, translat
     sqlContent += `DROP TABLE IF EXISTS book CASCADE;\n`;
     sqlContent += `DROP TABLE IF EXISTS translation CASCADE;\n\n`;
     
+    // Enable UUID extension
+    sqlContent += `-- Enable UUID extension\n`;
+    sqlContent += `CREATE EXTENSION IF NOT EXISTS "pgcrypto";\n\n`;
+    
     // Create translation table
     sqlContent += `-- Translation table\n`;
     sqlContent += `CREATE TABLE translation (\n`;
-    sqlContent += `    id SERIAL PRIMARY KEY,\n`;
+    sqlContent += `    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),\n`;
     sqlContent += `    code VARCHAR(50) UNIQUE NOT NULL,\n`;
     sqlContent += `    name VARCHAR(255) NOT NULL,\n`;
     sqlContent += `    language VARCHAR(50),\n`;
@@ -135,8 +139,8 @@ function generatePostgreSQL(sourceDirectory, formatDirectory, language, translat
     // Create book table
     sqlContent += `-- Book table\n`;
     sqlContent += `CREATE TABLE book (\n`;
-    sqlContent += `    id SERIAL PRIMARY KEY,\n`;
-    sqlContent += `    translation_id INTEGER NOT NULL,\n`;
+    sqlContent += `    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),\n`;
+    sqlContent += `    translation_id UUID NOT NULL,\n`;
     sqlContent += `    name VARCHAR(255) NOT NULL,\n`;
     sqlContent += `    book_number INTEGER NOT NULL,\n`;
     sqlContent += `    FOREIGN KEY (translation_id) REFERENCES translation(id) ON DELETE CASCADE\n`;
@@ -145,8 +149,8 @@ function generatePostgreSQL(sourceDirectory, formatDirectory, language, translat
     // Create chapter table
     sqlContent += `-- Chapter table\n`;
     sqlContent += `CREATE TABLE chapter (\n`;
-    sqlContent += `    id SERIAL PRIMARY KEY,\n`;
-    sqlContent += `    book_id INTEGER NOT NULL,\n`;
+    sqlContent += `    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),\n`;
+    sqlContent += `    book_id UUID NOT NULL,\n`;
     sqlContent += `    chapter_number INTEGER NOT NULL,\n`;
     sqlContent += `    FOREIGN KEY (book_id) REFERENCES book(id) ON DELETE CASCADE\n`;
     sqlContent += `);\n\n`;
@@ -154,8 +158,8 @@ function generatePostgreSQL(sourceDirectory, formatDirectory, language, translat
     // Create verse table
     sqlContent += `-- Verse table\n`;
     sqlContent += `CREATE TABLE verse (\n`;
-    sqlContent += `    id SERIAL PRIMARY KEY,\n`;
-    sqlContent += `    chapter_id INTEGER NOT NULL,\n`;
+    sqlContent += `    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),\n`;
+    sqlContent += `    chapter_id UUID NOT NULL,\n`;
     sqlContent += `    verse_number INTEGER NOT NULL,\n`;
     sqlContent += `    text TEXT NOT NULL,\n`;
     sqlContent += `    FOREIGN KEY (chapter_id) REFERENCES chapter(id) ON DELETE CASCADE\n`;
