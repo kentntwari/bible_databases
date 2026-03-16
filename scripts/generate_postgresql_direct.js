@@ -99,11 +99,16 @@ async function generatePostgreSQLDirect(sourceDirectory, language, translation) 
         
         // Begin transaction
         await client.query('BEGIN');
+
+        // Enable pgcrypto extension for UUID generation
+        await client.query(`
+            CREATE EXTENSION IF NOT EXISTS "pgcrypto"
+        `);
         
         // Create tables
         await client.query(`
             CREATE TABLE IF NOT EXISTS translation (
-                id SERIAL PRIMARY KEY,
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
                 code VARCHAR(50) UNIQUE NOT NULL,
                 name VARCHAR(255) NOT NULL,
                 language VARCHAR(50),
@@ -113,8 +118,8 @@ async function generatePostgreSQLDirect(sourceDirectory, language, translation) 
         
         await client.query(`
             CREATE TABLE IF NOT EXISTS book (
-                id SERIAL PRIMARY KEY,
-                translation_id INTEGER NOT NULL,
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                translation_id UUID NOT NULL,
                 name VARCHAR(255) NOT NULL,
                 book_number INTEGER NOT NULL,
                 FOREIGN KEY (translation_id) REFERENCES translation(id) ON DELETE CASCADE
@@ -123,8 +128,8 @@ async function generatePostgreSQLDirect(sourceDirectory, language, translation) 
         
         await client.query(`
             CREATE TABLE IF NOT EXISTS chapter (
-                id SERIAL PRIMARY KEY,
-                book_id INTEGER NOT NULL,
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                book_id UUID NOT NULL,
                 chapter_number INTEGER NOT NULL,
                 FOREIGN KEY (book_id) REFERENCES book(id) ON DELETE CASCADE
             )
@@ -132,8 +137,8 @@ async function generatePostgreSQLDirect(sourceDirectory, language, translation) 
         
         await client.query(`
             CREATE TABLE IF NOT EXISTS verse (
-                id SERIAL PRIMARY KEY,
-                chapter_id INTEGER NOT NULL,
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                chapter_id UUID NOT NULL,
                 verse_number INTEGER NOT NULL,
                 text TEXT NOT NULL,
                 FOREIGN KEY (chapter_id) REFERENCES chapter(id) ON DELETE CASCADE
