@@ -2,9 +2,24 @@ import { fileURLToPath } from 'url';
 import { dirname, join, resolve } from 'path';
 import { readdirSync, statSync, readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs';
 import * as readline from 'readline';
+import pg from 'pg';
+import dotenv from 'dotenv';
 
+dotenv.config();
+
+const { Client } = pg;
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
+
+// Database configuration from environment variables (used in --direct mode)
+const dbConfig = {
+    host: process.env.DB_HOST || 'localhost',
+    port: parseInt(process.env.DB_PORT || '5432'),
+    database: process.env.DB_NAME || 'bible_db',
+    user: process.env.DB_USER,
+    password: process.env.DB_PASSWORD,
+    ssl: process.env.DB_SSLMODE === 'require' ? { rejectUnauthorized: false } : false,
+};
 
 /**
  * Display numbered options and get user selection
@@ -42,6 +57,7 @@ function escapeString(text) {
  * Normalize text (replace special characters)
  */
 function normalizeText(text) {
+    if (!text) return '';
     // Replace common characters
     text = text.replace(/Æ/g, "'");
     // You can add more normalization logic here
@@ -83,9 +99,9 @@ function getLicenseInfo(sourceDirectory, language, translation) {
 }
 
 /**
- * Generate PostgreSQL dump with normalized schema
+ * Generate PostgreSQL dump file with normalized schema
  */
-function generatePostgreSQL(sourceDirectory, formatDirectory, language, translation, dryRun = false) {
+function generateDumpFile(sourceDirectory, formatDirectory, language, translation, dryRun = false) {
     console.log(`\n📖 Loading data for ${translation}...`);
     
     const data = loadJson(sourceDirectory, language, translation);
@@ -226,22 +242,185 @@ function generatePostgreSQL(sourceDirectory, formatDirectory, language, translat
     console.log(`   - License: ${licenseInfo}\n`);
 }
 
+/**
+ * Directly import a translation into a live PostgreSQL database
+ */
+async function generateDirect(sourceDirectory, language, translation) {
+    const client = new Client(dbConfig);
+    
+    try {
+        await client.connect();
+        console.log('✅ Connected to PostgreSQL database\n');
+        
+        const data = loadJson(sourceDirectory, language, translation);
+        const translationName = getReadmeTitle(sourceDirectory, language, translation);
+        const licenseInfo = getLicenseInfo(sourceDirectory, language, translation);
+        
+        // Begin transaction
+        await client.query('BEGIN');
+
+        // Enable pgcrypto extension for UUID generation
+        await client.query(`
+            CREATE EXTENSION IF NOT EXISTS "pgcrypto"
+        `);
+        
+        // Create tables
+        await client.query(`
+            CREATE TABLE IF NOT EXISTS translation (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                code VARCHAR(50) UNIQUE NOT NULL,
+                name VARCHAR(255) NOT NULL,
+                language VARCHAR(50),
+                license TEXT
+            )
+        `);
+        
+        await client.query(`
+            CREATE TABLE IF NOT EXISTS book (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                translation_id UUID NOT NULL,
+                name VARCHAR(255) NOT NULL,
+                book_number INTEGER NOT NULL,
+                FOREIGN KEY (translation_id) REFERENCES translation(id) ON DELETE CASCADE
+            )
+        `);
+        
+        await client.query(`
+            CREATE TABLE IF NOT EXISTS chapter (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                book_id UUID NOT NULL,
+                chapter_number INTEGER NOT NULL,
+                FOREIGN KEY (book_id) REFERENCES book(id) ON DELETE CASCADE
+            )
+        `);
+        
+        await client.query(`
+            CREATE TABLE IF NOT EXISTS verse (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                chapter_id UUID NOT NULL,
+                verse_number INTEGER NOT NULL,
+                text TEXT NOT NULL,
+                FOREIGN KEY (chapter_id) REFERENCES chapter(id) ON DELETE CASCADE
+            )
+        `);
+        
+        // Insert translation
+        const translationResult = await client.query(
+            'INSERT INTO translation (code, name, language, license) VALUES ($1, $2, $3, $4) ON CONFLICT (code) DO UPDATE SET name = $2, language = $3, license = $4 RETURNING id',
+            [translation, translationName, language, licenseInfo]
+        );
+        const translationId = translationResult.rows[0].id;
+        
+        console.log(`📝 Inserting data for ${translationName}...`);
+        
+        let totalVerses = 0;
+        
+        // Insert books, chapters, and verses with batched verse inserts
+        for (let bookIndex = 0; bookIndex < data.books.length; bookIndex++) {
+            const book = data.books[bookIndex];
+            
+            const bookResult = await client.query(
+                'INSERT INTO book (translation_id, name, book_number) VALUES ($1, $2, $3) RETURNING id',
+                [translationId, book.name, bookIndex + 1]
+            );
+            const bookId = bookResult.rows[0].id;
+            
+            for (const chapter of book.chapters) {
+                const chapterResult = await client.query(
+                    'INSERT INTO chapter (book_id, chapter_number) VALUES ($1, $2) RETURNING id',
+                    [bookId, chapter.chapter]
+                );
+                const chapterId = chapterResult.rows[0].id;
+                
+                // Batch insert verses for this chapter
+                if (chapter.verses && chapter.verses.length > 0) {
+                    const values = [];
+                    const params = [];
+                    let paramIndex = 1;
+                    
+                    for (const verse of chapter.verses) {
+                        values.push(`($${paramIndex}, $${paramIndex + 1}, $${paramIndex + 2})`);
+                        params.push(chapterId, verse.verse, normalizeText(verse.text));
+                        paramIndex += 3;
+                        totalVerses++;
+                    }
+                    
+                    await client.query(
+                        `INSERT INTO verse (chapter_id, verse_number, text) VALUES ${values.join(', ')}`,
+                        params
+                    );
+                }
+            }
+            
+            process.stdout.write(`\r   Progress: ${bookIndex + 1}/${data.books.length} books (${totalVerses} verses)`);
+        }
+        
+        console.log('\n');
+        
+        // Commit transaction
+        await client.query('COMMIT');
+        
+        console.log(`✅ Successfully imported ${translationName} into database!`);
+        console.log(`   Total verses: ${totalVerses}\n`);
+        
+    } catch (error) {
+        console.error('\n❌ Error during import:', error.message);
+        try {
+            await client.query('ROLLBACK');
+        } catch (rollbackError) {
+            // Connection may already be closed
+        }
+        throw error;
+    } finally {
+        try {
+            await client.end();
+        } catch (endError) {
+            // Connection may already be closed
+        }
+    }
+}
+
 async function main() {
     // Parse command line arguments
     const args = process.argv.slice(2);
-    const dryRun = args.includes('--dry-run') || args.includes('-d');
+    const directMode = args.includes('--direct') || args.includes('-D');
+    const dryRun = !directMode && (args.includes('--dry-run') || args.includes('-d'));
+    const wantsAll = args.includes('--all') || args.includes('-a');
+    const allTranslations = directMode && wantsAll;
     const languageArg = args.find(a => a.startsWith('--language=') || a.startsWith('-l='));
     const translationArg = args.find(a => a.startsWith('--translation=') || a.startsWith('-t='));
+
+    // --all only makes sense with --direct
+    if (wantsAll && !directMode) {
+        console.error('❌ --all / -a can only be used together with --direct / -D.');
+        process.exit(1);
+    }
     
     const cliLanguage = languageArg ? languageArg.split('=')[1] : null;
     const cliTranslation = translationArg ? translationArg.split('=')[1] : null;
     
-    console.log('╔════════════════════════════════════════╗');
-    console.log('║  Bible PostgreSQL Database Generator  ║');
-    console.log('╚════════════════════════════════════════╝\n');
-    
-    if (dryRun) {
-        console.log('🔍 Running in DRY RUN mode - no files will be written\n');
+    if (directMode) {
+        console.log('╔════════════════════════════════════════════╗');
+        console.log('║  Bible PostgreSQL Direct Database Import  ║');
+        console.log('╚════════════════════════════════════════════╝\n');
+
+        // Validate database config
+        if (!dbConfig.user || !dbConfig.password) {
+            console.error('❌ Missing database credentials. Set DB_USER and DB_PASSWORD in .env file.');
+            process.exit(1);
+        }
+
+        console.log(`📡 Database: ${dbConfig.host}:${dbConfig.port}/${dbConfig.database}`);
+        console.log(`👤 User: ${dbConfig.user}`);
+        console.log(`🔒 SSL: ${dbConfig.ssl ? 'enabled' : 'disabled'}\n`);
+    } else {
+        console.log('╔════════════════════════════════════════╗');
+        console.log('║  Bible PostgreSQL Database Generator  ║');
+        console.log('╚════════════════════════════════════════╝\n');
+
+        if (dryRun) {
+            console.log('🔍 Running in DRY RUN mode - no files will be written\n');
+        }
     }
     
     // Set base directories relative to the script location
@@ -249,7 +428,7 @@ async function main() {
     const sourceDirectory = join(baseDir, 'sources');
     const formatDirectory = join(baseDir, 'formats');
 
-    let language, translation;
+    let language;
     
     // Step 1: Select Language
     const languages = readdirSync(sourceDirectory)
@@ -268,7 +447,7 @@ async function main() {
         console.log(`\n✓ Selected language: ${language}\n`);
     }
 
-    // Step 2: Select Translation
+    // Step 2: Select Translation(s)
     const translationPath = join(sourceDirectory, language);
     const translations = readdirSync(translationPath)
         .filter(d => {
@@ -277,29 +456,52 @@ async function main() {
         })
         .sort();
     
-    if (cliTranslation && translations.includes(cliTranslation)) {
-        translation = cliTranslation;
-        console.log(`✓ Using translation from CLI: ${translation}`);
+    let translationsToProcess = [];
+
+    if (directMode && allTranslations) {
+        translationsToProcess = translations;
+        console.log(`✓ Importing ALL ${translations.length} translations\n`);
+    } else if (cliTranslation && translations.includes(cliTranslation)) {
+        translationsToProcess = [cliTranslation];
+        console.log(`✓ Using translation from CLI: ${cliTranslation}`);
     } else {
         console.log(`📖 Choose your translation for ${language}:`);
-        translation = await listOptions(translations, '\n👉 Enter the number corresponding to your translation: ');
+        const translation = await listOptions(translations, '\n👉 Enter the number corresponding to your translation: ');
+        translationsToProcess = [translation];
         console.log(`\n✓ Selected translation: ${translation}`);
     }
 
-    // Step 3: Generate PostgreSQL Dump
-    try {
-        generatePostgreSQL(sourceDirectory, formatDirectory, language, translation, dryRun);
-        
-        if (!dryRun) {
-            console.log('═══════════════════════════════════════');
-            console.log('Next steps:');
-            console.log('1. Create your database: createdb bible_db');
-            console.log('2. Run the SQL file: psql bible_db < ' + join(formatDirectory, 'psql', `${translation}.sql`));
-            console.log('═══════════════════════════════════════\n');
+    // Step 3: Generate output
+    if (directMode) {
+        for (const trans of translationsToProcess) {
+            try {
+                console.log(`\n${'═'.repeat(50)}`);
+                await generateDirect(sourceDirectory, language, trans);
+            } catch (error) {
+                console.error(`\n❌ Error importing ${trans}:`, error.message);
+                if (!allTranslations) {
+                    process.exit(1);
+                }
+            }
         }
-    } catch (error) {
-        console.error('\n❌ Error generating SQL:', error.message);
-        process.exit(1);
+        console.log('═'.repeat(50));
+        console.log(`\n✅ Import complete! ${translationsToProcess.length} translation(s) processed.\n`);
+    } else {
+        const trans = translationsToProcess[0];
+        try {
+            generateDumpFile(sourceDirectory, formatDirectory, language, trans, dryRun);
+            
+            if (!dryRun) {
+                console.log('═══════════════════════════════════════');
+                console.log('Next steps:');
+                console.log('1. Create your database: createdb bible_db');
+                console.log('2. Run the SQL file: psql bible_db < ' + join(formatDirectory, 'psql', `${trans}.sql`));
+                console.log('═══════════════════════════════════════\n');
+            }
+        } catch (error) {
+            console.error('\n❌ Error generating SQL:', error.message);
+            process.exit(1);
+        }
     }
 }
 
